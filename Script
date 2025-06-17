@@ -1,0 +1,172 @@
+--!strict
+
+-- Local script to simulate a "Time Stop" or "Stasis Field" around the local player,
+-- combined with Gojo-like immunity.
+--
+-- !!! IMPORTANT LIMITATIONS !!!
+-- This is a LOCAL SCRIPT. It runs ONLY on your computer.
+--
+-- 1.  VISUAL FREEZE ONLY: It can make objects *appear* frozen or slowed down
+--     on *your screen*, but these changes ARE NOT replicated to the server
+--     or other players. Other players will see things moving normally.
+--     Objects are still moving on the server, so you might see them "snap back"
+--     or "teleport" on your screen due to server replication.
+-- 2.  NO SERVER-SIDE IMMUNITY: While you will have instant health regeneration
+--     on your client (making you appear immune to damage), a local script
+--     cannot prevent damage or physics interactions that are calculated on the server.
+--     If the server registers a hit, you will still take damage or be affected.
+--     For true global immunity or freezing, a SERVER SCRIPT is required.
+--
+-- This script is primarily for a fun, client-side visual and personal invincibility effect.
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local LocalPlayer = Players.LocalPlayer
+
+-- Configuration for the Stasis Field
+local STASIS_FIELD_RADIUS = 30           -- Distance within which objects are affected
+local STASIS_FIELD_COLOR = Color3.fromRGB(50, 200, 255) -- Light blue
+local STASIS_FIELD_TRANSPARENCY = 0.6    -- Visual transparency of the sphere
+local IMMUNITY_REGEN_HEALTH = 100        -- Health player instantly regenerates to
+
+-- Store positions of objects within the stasis field to try and "freeze" them visually
+local frozenObjects = {} :: {[BasePart]: CFrame}
+
+-- Function to set up the Stasis/Infinity effect for a character
+local function setupStasisField(character: Model)
+    local humanoid: Humanoid = character:WaitForChild("Humanoid") :: Humanoid
+    local humanoidRootPart: Part = character:WaitForChild("HumanoidRootPart") :: Part
+
+    -- Create the visual "Stasis Field" sphere
+    local stasisFieldVisual = Instance.new("Part")
+    stasisFieldVisual.Name = "StasisFieldVisual"
+    stasisFieldVisual.Shape = Enum.PartType.Sphere
+    stasisFieldVisual.Material = Enum.Material.ForceField -- Good visual for energy field
+    stasisFieldVisual.Color = STASIS_FIELD_COLOR
+    stasisFieldVisual.Transparency = STASIS_FIELD_TRANSPARENCY
+    stasisFieldVisual.Size = Vector3.new(STASIS_FIELD_RADIUS * 2, STASIS_FIELD_RADIUS * 2, STASIS_FIELD_RADIUS * 2)
+    stasisFieldVisual.CanCollide = false
+    stasisFieldVisual.Anchored = false -- Must not be anchored to move with the player
+    stasisFieldVisual.Parent = character -- Parent to character for automatic cleanup
+
+    -- Weld the visual sphere to HumanoidRootPart
+    local weld = Instance.new("WeldConstraint")
+    weld.Name = "StasisWeld"
+    weld.Part0 = humanoidRootPart
+    weld.Part1 = stasisFieldVisual
+    weld.Parent = stasisFieldVisual
+
+    -- Main loop for stasis effect and health regeneration
+    local loopConnection: RBXScriptConnection?
+    loopConnection = RunService.RenderStepped:Connect(function()
+        -- Ensure character and humanoid still exist
+        if not character or not character.Parent or not humanoid or not humanoid.Parent then
+            if loopConnection then
+                loopConnection:Disconnect()
+                loopConnection = nil
+            end
+            if stasisFieldVisual and stasisFieldVisual.Parent then
+                stasisFieldVisual:Destroy()
+            end
+            frozenObjects = {} -- Clear the table
+            return
+        end
+
+        -- Update visual field position (it's welded, so this is mostly for completeness)
+        stasisFieldVisual.CFrame = humanoidRootPart.CFrame
+
+        -- Instant Health Regeneration (client-side only)
+        if humanoid.Health < IMMUNITY_REGEN_HEALTH then
+            humanoid.Health = IMMUNITY_REGEN_HEALTH
+        end
+
+        -- CLIENT-SIDE VISUAL FREEZING
+        -- Iterate through objects in the workspace
+        local currentObjectsInField = {} -- Keep track of objects currently in the field
+        for _, child in ipairs(Workspace:GetChildren()) do
+            -- Only consider BaseParts (actual physical objects) and Models (like characters)
+            if child:IsA("BasePart") then
+                -- Skip the player's own character parts and the visual field itself
+                if child ~= humanoidRootPart and not child:IsDescendantOf(character) and child ~= stasisFieldVisual then
+                    local distance = (child.Position - humanoidRootPart.Position).Magnitude
+
+                    if distance <= STASIS_FIELD_RADIUS then
+                        -- If object enters range, store its current CFrame
+                        if not frozenObjects[child] then
+                            frozenObjects[child] = child.CFrame
+                        end
+                        -- Attempt to set its CFrame back to the stored CFrame
+                        -- This creates a visual "stutter" or "freeze" on the client
+                        child.CFrame = frozenObjects[child]
+                        table.insert(currentObjectsInField, child)
+                    end
+                end
+            elseif child:IsA("Model") then
+                -- Check models (like other players' characters, props, vehicles)
+                -- Skip the local player's character model
+                if not child:IsDescendantOf(LocalPlayer.Character) then
+                    local partsInModel = child:GetDescendants()
+                    for _, partInModel in ipairs(partsInModel) do
+                        if partInModel:IsA("BasePart") then
+                            local distance = (partInModel.Position - humanoidRootPart.Position).Magnitude
+                            if distance <= STASIS_FIELD_RADIUS then
+                                -- Store/apply CFrame for each part in the model
+                                if not frozenObjects[partInModel] then
+                                    frozenObjects[partInModel] = partInModel.CFrame
+                                end
+                                partInModel.CFrame = frozenObjects[partInModel]
+                                table.insert(currentObjectsInField, partInModel)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        -- Clean up objects that have left the stasis field (remove them from our tracking)
+        for part, _ in pairs(frozenObjects) do
+            local found = false
+            for _, currentPart in ipairs(currentObjectsInField) do
+                if part == currentPart then
+                    found = true
+                    break
+                end
+            end
+            if not found then
+                -- If a part we were tracking is no longer in the field, stop trying to freeze it
+                frozenObjects[part] = nil
+            end
+        end
+    end)
+
+    -- Clean up when the character is removed (e.g., player dies/respawns)
+    local characterRemovingConnection: RBXScriptConnection?
+    characterRemovingConnection = character.AncestryChanged:Connect(function()
+        if not character.Parent then -- Character is no longer in workspace
+            if loopConnection then
+                loopConnection:Disconnect()
+                loopConnection = nil
+            end
+            if characterRemovingConnection then
+                characterRemovingConnection:Disconnect()
+                characterRemovingConnection = nil
+            end
+            if stasisFieldVisual and stasisFieldVisual.Parent then
+                stasisFieldVisual:Destroy()
+            end
+            frozenObjects = {} -- Clear the tracking table
+        end
+    end)
+
+    print("Client-side Stasis Field and Immunity activated for " .. LocalPlayer.Name)
+end
+
+-- Connect to CharacterAdded for initial setup and respawns
+LocalPlayer.CharacterAdded:Connect(setupStasisField)
+
+-- If the character already exists (e.g., script loaded while player is in game),
+-- call the function immediately
+if LocalPlayer.Character then
+    setupStasisField(LocalPlayer.Character)
+end
